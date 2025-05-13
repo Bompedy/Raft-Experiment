@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
-	"math/rand"
 	"net"
 	"os"
 	"raftlib/shared"
@@ -31,11 +30,11 @@ func Client() {
 	fmt.Printf("DATA_SIZE:                %d\n", dataSize)
 	fmt.Printf("NUM_OPS:                  %d\n", numOps)
 	fmt.Printf("LEADER_NODE_ADDRESS:      %v\n", leaderNodeAddress)
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	connections := make([]*shared.Client, numClients)
 	//fmt.Printf("data: %d(%s)\n", binary.LittleEndian.Uint16(writeBuffer[:8]), string(writeBuffer[8:]))
 
-	mutex := sync.Mutex{}
+	//mutex := sync.Mutex{}
+	responses := int32(0)
 
 	for i := 0; i < numClients; i++ {
 		for {
@@ -48,30 +47,43 @@ func Client() {
 			//fmt.Printf("Connected to %s\n", address)
 			client := &shared.Client{Connection: conn, Mutex: &sync.Mutex{}}
 			connections[i] = client
-			go func(i int, connection *shared.Client) {
-				buffer := make([]byte, 8)
-				for {
-					err := connection.Read(buffer)
-					if err != nil {
-						fmt.Println("Read error")
-						return
-					}
-					fmt.Printf("Response %d\n", binary.LittleEndian.Uint64(buffer))
-					if CLOSE_LOOP {
-						mutex.Unlock()
-					} else {
-						//TODO
-					}
-				}
-			}(i, client)
 			break
 		}
+	}
+	start := time.Now().UnixMilli()
+	for i := 0; i < numClients; i++ {
+		connection := connections[i]
+		go func(i int, connection *shared.Client) {
+			buffer := make([]byte, 8)
+			for {
+				err := connection.Read(buffer)
+				if err != nil {
+					fmt.Println("Read error")
+					return
+				}
+				//fmt.Printf("Response %d\n", binary.LittleEndian.Uint64(buffer))
+				if CLOSE_LOOP {
+					connection.Mutex.Unlock()
+					count := atomic.AddInt32(&responses, 1)
+					if count%1000 == 0 {
+						fmt.Printf("%d\n", count)
+					}
+					if count == int32(numOps) {
+						seconds := float64(time.Now().UnixMilli()-start) / 1000.0
+						fmt.Printf("%f ops in %f seconds\n", float64(numOps)/seconds, seconds)
+					}
+				} else {
+					//TODO
+				}
+			}
+		}(i, connection)
 	}
 
 	connectionIndex := int32(0)
 	remaining := numOps
 	perThread := numOps / numThreads
 
+	messageId := uint64(0)
 	for i := 0; i < numThreads; i++ {
 		leftover := 0
 		remaining -= perThread
@@ -84,27 +96,24 @@ func Client() {
 			sizeBuffer := make([]byte, 4)
 			buffer := make([]byte, dataSize+8)
 			for op := 0; op < perThread+leftover; op++ {
+				current := atomic.AddInt32(&connectionIndex, 1) - 1
+				connection := connections[current%int32(numClients)]
 				if CLOSE_LOOP {
-					mutex.Lock()
+					connection.Mutex.Lock()
 				} else {
 					//TODO
 				}
-				current := atomic.AddInt32(&connectionIndex, 1) - 1
-				connection := connections[current%int32(numClients)]
 				binary.LittleEndian.PutUint32(sizeBuffer, uint32(dataSize+8))
-				connection.Mutex.Lock()
 				err := connection.Write(sizeBuffer)
-				connection.Mutex.Unlock()
 				if err != nil {
 					log.Printf("Error sending message: %v", err)
 					return
 				}
-				messageId := r.Uint64()
-				fmt.Printf("Sending %d\n", messageId)
-				binary.LittleEndian.PutUint64(buffer, messageId)
-				connection.Mutex.Lock()
+				//messageId := r.Uint64()
+				//fmt.Printf("Sending %d\n", messageId)
+				currentMessageId := atomic.AddUint64(&messageId, 1) - 1
+				binary.LittleEndian.PutUint64(buffer, currentMessageId)
 				err = connection.Write(buffer)
-				connection.Mutex.Unlock()
 				if err != nil {
 					log.Printf("Error sending message: %v", err)
 					return

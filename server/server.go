@@ -40,7 +40,7 @@ func NewRaftServer() *RaftServer {
 		hostNodeAddress:    os.Getenv("HOST_NODE_ADDRESS"),
 		clientNodeAddress:  os.Getenv("CLIENT_NODE_ADDRESS"),
 		peerNodeAddresses:  peerAddresses,
-		numPeerConnections: len(peerAddresses),
+		numPeerConnections: shared.GetEnvInt("NUM_PEER_CONNECTIONS", 1),
 		dataSize:           shared.GetEnvInt("DATA_SIZE", 1),
 		storage:            raft.NewMemoryStorage(),
 	}
@@ -60,7 +60,7 @@ func (s *RaftServer) setupRaftConfig() {
 	s.config = &raft.Config{
 		ID:              uint64(s.nodeID),
 		ElectionTick:    10,
-		HeartbeatTick:   1,
+		HeartbeatTick:   5,
 		Storage:         s.storage,
 		MaxSizePerMsg:   4096,
 		MaxInflightMsgs: 256,
@@ -76,7 +76,7 @@ func (s *RaftServer) setupRaftConfig() {
 func (s *RaftServer) initializePeerConnections() {
 	s.peerConnections = make([][]*shared.Client, s.numNodes)
 	for i := range s.peerConnections {
-		s.peerConnections[i] = make([]*shared.Client, s.numPeerConnections)
+		s.peerConnections[i] = make([]*shared.Client, 0)
 	}
 
 	for i, nodeAddress := range s.peerNodeAddresses {
@@ -91,15 +91,16 @@ func (s *RaftServer) initializePeerConnections() {
 
 func (s *RaftServer) connectToPeer(address string, index int) {
 	for {
-		//fmt.Printf("Connecting to %s\n", address)
 		conn, err := net.Dial("tcp", address)
 		if err != nil {
 			time.Sleep(1 * time.Second)
 			continue
 		}
-		//fmt.Printf("Connected to %s\n", address)
 		client := &shared.Client{Connection: conn, Mutex: &sync.Mutex{}}
 		s.peerConnections[index] = append(s.peerConnections[index], client)
+		if len(s.peerConnections[index]) != s.numPeerConnections {
+			continue
+		}
 		break
 	}
 }
@@ -200,7 +201,6 @@ func (s *RaftServer) processPeerMessages(client *shared.Client) {
 			log.Printf("Unmarshal error: %v", err)
 			continue
 		}
-		fmt.Println("Proposal received")
 
 		if err := s.node.Step(context.TODO(), msg); err != nil {
 			log.Printf("Step error: %v", err)
@@ -213,6 +213,7 @@ func (s *RaftServer) runRaftLoop() {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
+	fmt.Println("Gets here?")
 	for {
 		select {
 		case <-ticker.C:
@@ -287,19 +288,26 @@ func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 			s.node.ApplyConfChange(cc)
 		case raftpb.EntryNormal:
 			// Apply to state machine
-			if len(entry.Data) >= 8 {
+			//fmt.Printf("Commit proposal of size %d\n", len(entry.Data))
+			if s.node.Status().Lead == s.config.ID && len(entry.Data) >= 8 {
 				messageId := binary.LittleEndian.Uint64(entry.Data[:8])
-				senderAny, ok := s.senders.Load(messageId)
-				if ok {
-					sender := senderAny.(*shared.Client)
-					sender.Mutex.Lock()
-					if err := sender.Write(entry.Data[:8]); err != nil {
+				//TODO: determine whether this is correct solution
+				for {
+					senderAny, ok := s.senders.LoadAndDelete(messageId)
+					if ok {
+						sender := senderAny.(*shared.Client)
+						sender.Mutex.Lock()
+						if err := sender.Write(entry.Data[:8]); err != nil {
+							sender.Mutex.Unlock()
+							log.Printf("Write error: %v", err)
+							continue
+						}
 						sender.Mutex.Unlock()
-						log.Printf("Write error: %v", err)
-						continue
+						break
+						//fmt.Printf("Committing %d\n", messageId)
+					} else {
+						fmt.Printf("Unable to load %d\n", messageId)
 					}
-					sender.Mutex.Unlock()
-					fmt.Printf("Committing %d\n", messageId)
 				}
 			}
 		}
