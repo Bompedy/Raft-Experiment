@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"os"
 	"raftlib/shared"
@@ -11,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 )
+
+const CLOSE_LOOP = true
 
 func Client() {
 	numThreads := shared.GetEnvInt("NUM_THREADS", 1)
@@ -28,9 +31,11 @@ func Client() {
 	fmt.Printf("DATA_SIZE:                %d\n", dataSize)
 	fmt.Printf("NUM_OPS:                  %d\n", numOps)
 	fmt.Printf("LEADER_NODE_ADDRESS:      %v\n", leaderNodeAddress)
-
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	connections := make([]*shared.Client, numClients)
-	data := make([]byte, dataSize)
+	//fmt.Printf("data: %d(%s)\n", binary.LittleEndian.Uint16(writeBuffer[:8]), string(writeBuffer[8:]))
+
+	mutex := sync.Mutex{}
 
 	for i := 0; i < numClients; i++ {
 		for {
@@ -41,7 +46,24 @@ func Client() {
 				continue
 			}
 			//fmt.Printf("Connected to %s\n", address)
-			connections[i] = &shared.Client{Connection: conn, Mutex: &sync.Mutex{}}
+			client := &shared.Client{Connection: conn, Mutex: &sync.Mutex{}}
+			connections[i] = client
+			go func(i int, connection *shared.Client) {
+				buffer := make([]byte, 8)
+				for {
+					err := connection.Read(buffer)
+					if err != nil {
+						fmt.Println("Read error")
+						return
+					}
+					fmt.Printf("Response %d\n", binary.LittleEndian.Uint64(buffer))
+					if CLOSE_LOOP {
+						mutex.Unlock()
+					} else {
+						//TODO
+					}
+				}
+			}(i, client)
 			break
 		}
 	}
@@ -49,31 +71,49 @@ func Client() {
 	connectionIndex := int32(0)
 	remaining := numOps
 	perThread := numOps / numThreads
-	for index := 0; index < numThreads; index++ {
+
+	for i := 0; i < numThreads; i++ {
 		leftover := 0
 		remaining -= perThread
 		if remaining < perThread {
 			leftover = remaining
 			remaining = 0
 		}
-		fmt.Printf("Thread %d performing %d ops", index, perThread+leftover)
+		fmt.Printf("Thread %d performing %d ops\n", i, perThread+leftover)
 		go func(i int) {
 			sizeBuffer := make([]byte, 4)
+			buffer := make([]byte, dataSize+8)
 			for op := 0; op < perThread+leftover; op++ {
-				connection := connections[atomic.AddInt32(&connectionIndex, 1)-1]
-				binary.LittleEndian.PutUint32(sizeBuffer, uint32(dataSize))
+				if CLOSE_LOOP {
+					mutex.Lock()
+				} else {
+					//TODO
+				}
+				current := atomic.AddInt32(&connectionIndex, 1) - 1
+				connection := connections[current%int32(numClients)]
+				binary.LittleEndian.PutUint32(sizeBuffer, uint32(dataSize+8))
+				connection.Mutex.Lock()
 				err := connection.Write(sizeBuffer)
+				connection.Mutex.Unlock()
 				if err != nil {
 					log.Printf("Error sending message: %v", err)
 					return
 				}
-				err = connection.Write(data)
+				messageId := r.Uint64()
+				fmt.Printf("Sending %d\n", messageId)
+				binary.LittleEndian.PutUint64(buffer, messageId)
+				connection.Mutex.Lock()
+				err = connection.Write(buffer)
+				connection.Mutex.Unlock()
 				if err != nil {
 					log.Printf("Error sending message: %v", err)
 					return
 				}
-				//do a read here and convert to for {}
 			}
-		}(index)
+		}(i)
+	}
+
+	for {
+		continue
 	}
 }

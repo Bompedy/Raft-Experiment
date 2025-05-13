@@ -20,10 +20,12 @@ type RaftServer struct {
 	numNodes                 int
 	numPeerConnections       int
 	numPeerClientConnections int
+	dataSize                 int
 	hostNodeAddress          string
 	clientNodeAddress        string
 	peerNodeAddresses        []string
 	peerConnections          [][]*shared.Client
+	senders                  sync.Map
 	node                     raft.Node
 	storage                  *raft.MemoryStorage
 	config                   *raft.Config
@@ -39,6 +41,7 @@ func NewRaftServer() *RaftServer {
 		clientNodeAddress:  os.Getenv("CLIENT_NODE_ADDRESS"),
 		peerNodeAddresses:  peerAddresses,
 		numPeerConnections: len(peerAddresses),
+		dataSize:           shared.GetEnvInt("DATA_SIZE", 1),
 		storage:            raft.NewMemoryStorage(),
 	}
 
@@ -127,6 +130,7 @@ func (s *RaftServer) handleClientConnections(listener net.Listener) {
 			continue
 		}
 
+		log.Println("Client connected")
 		client := &shared.Client{Connection: conn, Mutex: &sync.Mutex{}}
 		go s.processClientMessages(client)
 	}
@@ -149,6 +153,9 @@ func (s *RaftServer) processClientMessages(client *shared.Client) {
 		}
 
 		if s.node.Status().Lead == s.config.ID {
+			messageId := binary.LittleEndian.Uint64(readBuffer[:8])
+			//fmt.Printf("data: %d(%s)\n", messageId, string(readBuffer[8:8+s.dataSize]))
+			s.senders.Store(messageId, client)
 			if err := s.node.Propose(context.TODO(), readBuffer[:amount]); err != nil {
 				log.Printf("Proposal error: %v", err)
 			}
@@ -193,6 +200,7 @@ func (s *RaftServer) processPeerMessages(client *shared.Client) {
 			log.Printf("Unmarshal error: %v", err)
 			continue
 		}
+		fmt.Println("Proposal received")
 
 		if err := s.node.Step(context.TODO(), msg); err != nil {
 			log.Printf("Step error: %v", err)
@@ -244,17 +252,22 @@ func (s *RaftServer) sendMessages(messages []raftpb.Message) {
 			continue
 		}
 
-		amountBuffer := make([]byte, 4)
-		binary.LittleEndian.PutUint32(amountBuffer, uint32(len(bytes)))
+		sizeBuffer := make([]byte, 4)
+		binary.LittleEndian.PutUint32(sizeBuffer, uint32(len(bytes)))
 
 		connection := s.peerConnections[msg.To-1][0]
-		if err := connection.Write(amountBuffer); err != nil {
+		connection.Mutex.Lock()
+		if err := connection.Write(sizeBuffer); err != nil {
+			connection.Mutex.Unlock()
 			log.Printf("Write error: %v", err)
 			continue
 		}
 		if err := connection.Write(bytes); err != nil {
+			connection.Mutex.Unlock()
 			log.Printf("Write error: %v", err)
+			continue
 		}
+		connection.Mutex.Unlock()
 	}
 }
 
@@ -274,6 +287,21 @@ func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 			s.node.ApplyConfChange(cc)
 		case raftpb.EntryNormal:
 			// Apply to state machine
+			if len(entry.Data) >= 8 {
+				messageId := binary.LittleEndian.Uint64(entry.Data[:8])
+				senderAny, ok := s.senders.Load(messageId)
+				if ok {
+					sender := senderAny.(*shared.Client)
+					sender.Mutex.Lock()
+					if err := sender.Write(entry.Data[:8]); err != nil {
+						sender.Mutex.Unlock()
+						log.Printf("Write error: %v", err)
+						continue
+					}
+					sender.Mutex.Unlock()
+					fmt.Printf("Committing %d\n", messageId)
+				}
+			}
 		}
 	}
 }
