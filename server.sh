@@ -12,7 +12,7 @@ HOST_NODE_ADDRESS=$4
 CLIENT_NODE_ADDRESS=$5
 PEER_NODE_ADDRESSES=$6
 
-cd /local/raft-experiment || { echo "Failed to cd to /local/Raft-Experiment"; exit 1; }
+cd /local/Raft-Experiment || { echo "Failed to cd to /local/Raft-Experiment"; exit 1; }
 
 echo "Pulling latest changes from Git..."
 git pull || { echo "Git pull failed"; exit 1; }
