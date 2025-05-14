@@ -12,7 +12,7 @@ NUM_THREADS=$4
 NUM_OPS=$5
 LEADER_NODE_ADDRESS=$6
 
-cd /local/raft-experiment || { echo "Failed to cd to /local/raft-experiment"; exit 1; }
+cd /local/raft-experiment || { echo "Failed to cd to /local/Raft-Experiment"; exit 1; }
 
 echo "Pulling latest changes from Git..."
 git pull || { echo "Git pull failed"; exit 1; }
