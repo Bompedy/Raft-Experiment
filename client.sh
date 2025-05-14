@@ -27,4 +27,4 @@ export NUM_THREADS
 export NUM_OPS
 export LEADER_NODE_ADDRESS
 
-./raftlib.exe client
+./raftlib client

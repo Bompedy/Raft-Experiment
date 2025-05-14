@@ -28,4 +28,4 @@ export HOST_NODE_ADDRESS
 export CLIENT_NODE_ADDRESS
 export PEER_NODE_ADDRESSES
 
-./raftlib.exe server
+./raftlib server
