@@ -154,11 +154,11 @@ func (s *RaftServer) processClientMessages(client *shared.Client) {
 		}
 
 		if s.node.Status().Lead == s.config.ID {
-			messageId := binary.LittleEndian.Uint64(readBuffer[:8])
-			//fmt.Printf("data: %d(%s)\n", messageId, string(readBuffer[8:8+s.dataSize]))
-			fmt.Printf("Storing message %d with id %d\n", amount, messageId)
+			messageId := binary.LittleEndian.Uint32(readBuffer[:4])
 			s.senders.Store(messageId, client)
-			if err := s.node.Propose(context.TODO(), readBuffer[:amount]); err != nil {
+			bufferCopy := make([]byte, amount)
+			copy(bufferCopy, readBuffer[:amount])
+			if err := s.node.Propose(context.TODO(), bufferCopy); err != nil {
 				log.Printf("Proposal error: %v", err)
 			}
 		} else {
@@ -183,7 +183,8 @@ func (s *RaftServer) handlePeerConnections(listener net.Listener) {
 func (s *RaftServer) processPeerMessages(client *shared.Client) {
 	s.waitGroup.Done()
 	sizeBuffer := make([]byte, 4)
-	readBuffer := make([]byte, s.config.MaxSizePerMsg)
+	//TODO: figure out why bulking means this cant just be s.config.MaxSizePerMsg size
+	readBuffer := make([]byte, 65535)
 
 	for {
 		if err := client.Read(sizeBuffer); err != nil {
@@ -255,6 +256,7 @@ func (s *RaftServer) sendMessages(messages []raftpb.Message) {
 		}
 
 		sizeBuffer := make([]byte, 4)
+		//fmt.Printf("Sending %d bytes\n", len(bytes))
 		binary.LittleEndian.PutUint32(sizeBuffer, uint32(len(bytes)))
 
 		connection := s.peerConnections[msg.To-1][0]
@@ -290,14 +292,15 @@ func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 		case raftpb.EntryNormal:
 			// Apply to state machine
 			//fmt.Printf("Commit proposal of size %d\n", len(entry.Data))
-			if s.node.Status().Lead == s.config.ID && len(entry.Data) >= 8 {
-				messageId := binary.LittleEndian.Uint64(entry.Data[:8])
+			if s.node.Status().Lead == s.config.ID && len(entry.Data) >= 4 {
+				messageId := binary.LittleEndian.Uint32(entry.Data[:4])
+				//fmt.Printf("Committing %d\n", messageId)
 				//TODO: determine whether this is correct solution
 				senderAny, ok := s.senders.LoadAndDelete(messageId)
 				if ok {
 					sender := senderAny.(*shared.Client)
 					sender.Mutex.Lock()
-					if err := sender.Write(entry.Data[:8]); err != nil {
+					if err := sender.Write(entry.Data[:4]); err != nil {
 						sender.Mutex.Unlock()
 						log.Printf("Write error: %v", err)
 						continue
@@ -305,8 +308,6 @@ func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 						sender.Mutex.Unlock()
 					}
 					//fmt.Printf("Committing %d\n", messageId)
-				} else {
-					fmt.Printf("Unable to load %d\n", messageId)
 				}
 			}
 		}

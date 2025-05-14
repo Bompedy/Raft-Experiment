@@ -24,7 +24,7 @@ func Client() {
 	leaderNodeAddress := os.Getenv("LEADER_NODE_ADDRESS")
 
 	fmt.Println("=== Client Configuration ===")
-	fmt.Printf("CLOSED_LOOP:              %d\n", closedLoop)
+	fmt.Printf("CLOSED_LOOP:              %s\n", closedLoop)
 	fmt.Printf("NUM_THREADS:              %d\n", numThreads)
 	fmt.Printf("NUM_CLIENTS:              %d\n", numClients)
 	fmt.Printf("DATA_SIZE:                %d\n", dataSize)
@@ -58,13 +58,13 @@ func Client() {
 			go func(threadId int) {
 				connectionIndex := threadId % numClients
 				startOp := threadId * opsPerThread
-				buffer := make([]byte, dataSize+12)
-				responseBuffer := make([]byte, 8)
+				buffer := make([]byte, dataSize+8)
+				responseBuffer := make([]byte, 4)
 				startGroup.Done()
 				startGroup.Wait()
 
 				for op := range opsPerThread {
-					binary.LittleEndian.PutUint32(buffer, uint32(dataSize+8))
+					binary.LittleEndian.PutUint32(buffer, uint32(dataSize+4))
 					binary.LittleEndian.PutUint32(buffer[4:], uint32(startOp+op))
 					connection := connections[connectionIndex]
 					connectionIndex = (connectionIndex + 1) % numClients
@@ -92,7 +92,6 @@ func Client() {
 		total := time.Since(start)
 		ops := float64(numOps) / total.Seconds()
 		fmt.Printf("Total clients: %d\n", numClients)
-		fmt.Printf("Total threads: %d\n", numThreads)
 		fmt.Printf("Total operations: %d\n", numOps)
 		fmt.Printf("Total time taken: %v\n", total)
 		fmt.Printf("Data size: %d bytes\n", dataSize)
@@ -104,13 +103,17 @@ func Client() {
 			connection := connections[i]
 			go func() {
 				for {
-					buffer := make([]byte, 8)
+					buffer := make([]byte, 4)
 					err := connection.Read(buffer)
 					if err != nil {
 						panic(err)
 					}
-					fmt.Printf("Client %d: Read %d\n", i, len(buffer))
-					if completedOps.Add(1) == uint64(numOps) {
+					//fmt.Printf("Client %d: Read %d\n", i, len(buffer))
+					completed := completedOps.Add(1)
+					if completed%10000 == 0 {
+						fmt.Printf("%d\n", completed)
+					}
+					if completed == uint64(numOps) {
 						close(completeChannel)
 					}
 				}
@@ -125,12 +128,12 @@ func Client() {
 			go func(threadId int) {
 				connectionIndex := threadId % numClients
 				startOp := threadId * opsPerThread
-				buffer := make([]byte, dataSize+12)
+				buffer := make([]byte, dataSize+8)
 				startGroup.Done()
 				startGroup.Wait()
 
 				for op := range opsPerThread {
-					binary.LittleEndian.PutUint32(buffer, uint32(dataSize+8))
+					binary.LittleEndian.PutUint32(buffer, uint32(dataSize+4))
 					binary.LittleEndian.PutUint32(buffer[4:], uint32(startOp+op))
 					connection := connections[connectionIndex]
 					connectionIndex = (connectionIndex + 1) % numClients
@@ -152,7 +155,6 @@ func Client() {
 		total := time.Since(start)
 		ops := float64(numOps) / total.Seconds()
 		fmt.Printf("Total clients: %d\n", numClients)
-		fmt.Printf("Total threads: %d\n", numThreads)
 		fmt.Printf("Total operations: %d\n", numOps)
 		fmt.Printf("Total time taken: %v\n", total)
 		fmt.Printf("Data size: %d bytes\n", dataSize)
