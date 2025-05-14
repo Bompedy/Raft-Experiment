@@ -156,6 +156,7 @@ func (s *RaftServer) processClientMessages(client *shared.Client) {
 		if s.node.Status().Lead == s.config.ID {
 			messageId := binary.LittleEndian.Uint64(readBuffer[:8])
 			//fmt.Printf("data: %d(%s)\n", messageId, string(readBuffer[8:8+s.dataSize]))
+			fmt.Printf("Storing message %d with id %d\n", amount, messageId)
 			s.senders.Store(messageId, client)
 			if err := s.node.Propose(context.TODO(), readBuffer[:amount]); err != nil {
 				log.Printf("Proposal error: %v", err)
@@ -292,22 +293,20 @@ func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 			if s.node.Status().Lead == s.config.ID && len(entry.Data) >= 8 {
 				messageId := binary.LittleEndian.Uint64(entry.Data[:8])
 				//TODO: determine whether this is correct solution
-				for {
-					senderAny, ok := s.senders.LoadAndDelete(messageId)
-					if ok {
-						sender := senderAny.(*shared.Client)
-						sender.Mutex.Lock()
-						if err := sender.Write(entry.Data[:8]); err != nil {
-							sender.Mutex.Unlock()
-							log.Printf("Write error: %v", err)
-							continue
-						}
+				senderAny, ok := s.senders.LoadAndDelete(messageId)
+				if ok {
+					sender := senderAny.(*shared.Client)
+					sender.Mutex.Lock()
+					if err := sender.Write(entry.Data[:8]); err != nil {
 						sender.Mutex.Unlock()
-						break
-						//fmt.Printf("Committing %d\n", messageId)
+						log.Printf("Write error: %v", err)
+						continue
 					} else {
-						fmt.Printf("Unable to load %d\n", messageId)
+						sender.Mutex.Unlock()
 					}
+					//fmt.Printf("Committing %d\n", messageId)
+				} else {
+					fmt.Printf("Unable to load %d\n", messageId)
 				}
 			}
 		}
