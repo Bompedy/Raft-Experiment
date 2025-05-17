@@ -308,7 +308,9 @@ func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 				//fmt.Printf("Committing %d\n", messageId)
 				//TODO: determine whether this is correct solution
 				COMMITTED += 1
-				fmt.Printf("Committing %d, %d == %d\n", messageId, COMMITTED, MESSAGES)
+				if COMMITTED%100000 == 0 {
+					fmt.Printf("Committing %d, %d == %d\n", messageId, COMMITTED, MESSAGES)
+				}
 				if COMMITTED == MESSAGES {
 					seconds := float64(time.Now().UnixMilli()-START) / 1000.0
 					fmt.Printf("%f OPS", float64(MESSAGES)/seconds)
