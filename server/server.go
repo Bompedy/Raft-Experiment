@@ -192,6 +192,8 @@ func (s *RaftServer) processPeerMessages(client *shared.Client) {
 			return
 		}
 
+		//fmt.Println("Got a peer message?")
+
 		amount := binary.LittleEndian.Uint32(sizeBuffer)
 		if err := client.Read(readBuffer[:amount]); err != nil {
 			log.Printf("Error reading message: %v", err)
@@ -212,7 +214,7 @@ func (s *RaftServer) processPeerMessages(client *shared.Client) {
 
 func (s *RaftServer) runRaftLoop() {
 	s.waitGroup.Wait()
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(1 * time.Millisecond)
 	defer ticker.Stop()
 
 	fmt.Println("Gets here?")
@@ -247,6 +249,8 @@ func (s *RaftServer) appendEntries(entries []raftpb.Entry) {
 	}
 }
 
+var sizeBuffer = make([]byte, 4)
+
 func (s *RaftServer) sendMessages(messages []raftpb.Message) {
 	for _, msg := range messages {
 		bytes, err := msg.Marshal()
@@ -255,7 +259,6 @@ func (s *RaftServer) sendMessages(messages []raftpb.Message) {
 			continue
 		}
 
-		sizeBuffer := make([]byte, 4)
 		//fmt.Printf("Sending %d bytes\n", len(bytes))
 		binary.LittleEndian.PutUint32(sizeBuffer, uint32(len(bytes)))
 
@@ -279,6 +282,12 @@ func (s *RaftServer) applySnapshot(snapshot raftpb.Snapshot) {
 	fmt.Println("Applying snapshot...")
 }
 
+// TODO: find out why if I propose from within the node I can get 150k ops
+// but if messages come from the client we linger around 50-70k
+var MESSAGES = 5000000
+var COMMITTED = 0
+var START = int64(0)
+
 func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 	for _, entry := range entries {
 		switch entry.Type {
@@ -292,23 +301,33 @@ func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 		case raftpb.EntryNormal:
 			// Apply to state machine
 			//fmt.Printf("Commit proposal of size %d\n", len(entry.Data))
+			//fmt.Printf("Committing something %d, %d, %d\n", s.node.Status().Lead, s.config.ID, len(entry.Data))
 			if s.node.Status().Lead == s.config.ID && len(entry.Data) >= 4 {
 				messageId := binary.LittleEndian.Uint32(entry.Data[:4])
 				//fmt.Printf("Committing %d\n", messageId)
 				//TODO: determine whether this is correct solution
-				senderAny, ok := s.senders.LoadAndDelete(messageId)
-				if ok {
-					sender := senderAny.(*shared.Client)
-					sender.Mutex.Lock()
-					if err := sender.Write(entry.Data[:4]); err != nil {
-						sender.Mutex.Unlock()
-						log.Printf("Write error: %v", err)
-						continue
-					} else {
-						sender.Mutex.Unlock()
-					}
-					//fmt.Printf("Committing %d\n", messageId)
+				COMMITTED += 1
+				if COMMITTED%10000 == 0 {
+					fmt.Printf("Committing %d\n", messageId)
 				}
+				if COMMITTED == MESSAGES {
+					seconds := float64(time.Now().UnixMilli()-START) / 1000.0
+					fmt.Printf("%f OPS", float64(MESSAGES)/seconds)
+				}
+
+				//senderAny, ok := s.senders.LoadAndDelete(messageId)
+				//if ok {
+				//	sender := senderAny.(*shared.Client)
+				//	sender.Mutex.Lock()
+				//	if err := sender.Write(entry.Data[:4]); err != nil {
+				//		sender.Mutex.Unlock()
+				//		log.Printf("Write error: %v", err)
+				//		continue
+				//	} else {
+				//		sender.Mutex.Unlock()
+				//	}
+				//	fmt.Printf("Committing %d\n", messageId)
+				//}
 			}
 		}
 	}
@@ -319,5 +338,26 @@ func Server() {
 	server.setupRaftConfig()
 	server.startNetworkListeners()
 	server.initializePeerConnections()
+	go func() {
+		index := 0
+		buffer := make([]byte, 5)
+		time.Sleep(5 * time.Second)
+		START = time.Now().UnixMilli()
+		fmt.Println("Started proposing")
+		for {
+			if index >= MESSAGES {
+				break
+			}
+			binary.LittleEndian.PutUint32(buffer, uint32(index))
+			//copyBuffer := make([]byte, 5)
+			//copy(copyBuffer, buffer)
+			err := server.node.Propose(context.TODO(), buffer)
+			if err != nil {
+				fmt.Println("Error proposing")
+				return
+			}
+			index++
+		}
+	}()
 	server.runRaftLoop()
 }
