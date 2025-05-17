@@ -12,6 +12,7 @@ import (
 	"raftlib/shared"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -284,8 +285,8 @@ func (s *RaftServer) applySnapshot(snapshot raftpb.Snapshot) {
 
 // TODO: find out why if I propose from within the node I can get 150k ops
 // but if messages come from the client we linger around 50-70k
-var MESSAGES = 5000000
-var COMMITTED = 0
+var MESSAGES = int32(5000000)
+var COMMITTED = int32(0)
 var START = int64(0)
 
 func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
@@ -338,26 +339,30 @@ func Server() {
 	server.setupRaftConfig()
 	server.startNetworkListeners()
 	server.initializePeerConnections()
-	go func() {
-		index := 0
-		buffer := make([]byte, 5)
-		time.Sleep(5 * time.Second)
-		START = time.Now().UnixMilli()
-		fmt.Println("Started proposing")
-		for {
-			if index >= MESSAGES {
-				break
+
+	currentIndex := int32(0)
+	for i := 0; i < 10; i++ {
+		go func() {
+			buffer := make([]byte, 5)
+			time.Sleep(5 * time.Second)
+			START = time.Now().UnixMilli()
+			fmt.Println("Started proposing")
+			for {
+				index := atomic.AddInt32(&currentIndex, 1)
+				if index >= MESSAGES {
+					break
+				}
+				binary.LittleEndian.PutUint32(buffer, uint32(index))
+				//copyBuffer := make([]byte, 5)
+				//copy(copyBuffer, buffer)
+				err := server.node.Propose(context.TODO(), buffer)
+				if err != nil {
+					fmt.Println("Error proposing")
+					return
+				}
 			}
-			binary.LittleEndian.PutUint32(buffer, uint32(index))
-			//copyBuffer := make([]byte, 5)
-			//copy(copyBuffer, buffer)
-			err := server.node.Propose(context.TODO(), buffer)
-			if err != nil {
-				fmt.Println("Error proposing")
-				return
-			}
-			index++
-		}
-	}()
+		}()
+	}
+
 	server.runRaftLoop()
 }
