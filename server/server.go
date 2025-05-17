@@ -308,9 +308,7 @@ func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 				//fmt.Printf("Committing %d\n", messageId)
 				//TODO: determine whether this is correct solution
 				COMMITTED += 1
-				if COMMITTED%10000 == 0 {
-					fmt.Printf("Committing %d\n", messageId)
-				}
+				fmt.Printf("Committing %d, %d == %d\n", messageId, COMMITTED, MESSAGES)
 				if COMMITTED == MESSAGES {
 					seconds := float64(time.Now().UnixMilli()-START) / 1000.0
 					fmt.Printf("%f OPS", float64(MESSAGES)/seconds)
@@ -349,7 +347,7 @@ func Server() {
 			fmt.Println("Started proposing")
 			for {
 				index := atomic.AddInt32(&currentIndex, 1)
-				if index >= MESSAGES {
+				if index > MESSAGES {
 					break
 				}
 				binary.LittleEndian.PutUint32(buffer, uint32(index))
