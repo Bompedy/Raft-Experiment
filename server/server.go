@@ -341,7 +341,7 @@ func Server() {
 	server.initializePeerConnections()
 
 	currentIndex := int32(0)
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 50; i++ {
 		go func() {
 			buffer := make([]byte, 5)
 			time.Sleep(5 * time.Second)
