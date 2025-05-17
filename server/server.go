@@ -215,7 +215,7 @@ func (s *RaftServer) processPeerMessages(client *shared.Client) {
 
 func (s *RaftServer) runRaftLoop() {
 	s.waitGroup.Wait()
-	ticker := time.NewTicker(1 * time.Millisecond)
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	fmt.Println("Gets here?")
