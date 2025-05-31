@@ -328,9 +328,9 @@ func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 				senderAny, ok := s.senders.LoadAndDelete(messageId)
 				if ok {
 					sender := senderAny.(*shared.Client)
-					//sender.Mutex.Lock()
+					sender.Mutex.Lock()
 					if err := sender.Write(entry.Data[:4]); err != nil {
-						//sender.Mutex.Unlock()
+						sender.Mutex.Unlock()
 						log.Printf("Write error: %v", err)
 						continue
 					} else {
