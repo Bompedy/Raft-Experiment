@@ -148,7 +148,7 @@ func (s *RaftServer) handleClientConnections(listener net.Listener) {
 
 func (s *RaftServer) processClientMessages(client *shared.Client) {
 	sizeBuffer := make([]byte, 4)
-	readBuffer := make([]byte, s.config.MaxSizePerMsg)
+	readBuffer := make([]byte, 1000000)
 
 	for {
 		if err := client.Read(sizeBuffer); err != nil {
