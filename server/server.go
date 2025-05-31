@@ -336,7 +336,7 @@ func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 					} else {
 						sender.Mutex.Unlock()
 					}
-					fmt.Printf("Committing %d\n", messageId)
+					//fmt.Printf("Committing %d\n", messageId)
 				}
 			}
 		}
