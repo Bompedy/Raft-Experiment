@@ -1,6 +1,11 @@
 package server
 
 import (
+	"math"
+	"net/http"
+	_ "net/http/pprof"
+)
+import (
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -12,7 +17,6 @@ import (
 	"raftlib/shared"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -46,6 +50,10 @@ func NewRaftServer() *RaftServer {
 		storage:            raft.NewMemoryStorage(),
 	}
 
+	go func() {
+		log.Println(http.ListenAndServe("10.10.1.1:6060", nil))
+	}()
+
 	fmt.Println("=== Server Configuration ===")
 	fmt.Printf("NODE_ID:                     %d\n", s.nodeID)
 	fmt.Printf("NUM_NODES:                   %d\n", s.numNodes)
@@ -61,10 +69,10 @@ func (s *RaftServer) setupRaftConfig() {
 	s.config = &raft.Config{
 		ID:              uint64(s.nodeID),
 		ElectionTick:    10,
-		HeartbeatTick:   5,
+		HeartbeatTick:   1,
 		Storage:         s.storage,
-		MaxSizePerMsg:   4096,
-		MaxInflightMsgs: 256,
+		MaxSizePerMsg:   math.MaxUint64,
+		MaxInflightMsgs: 5000000,
 	}
 
 	peers := make([]raft.Peer, s.numNodes)
@@ -185,7 +193,7 @@ func (s *RaftServer) processPeerMessages(client *shared.Client) {
 	s.waitGroup.Done()
 	sizeBuffer := make([]byte, 4)
 	//TODO: figure out why bulking means this cant just be s.config.MaxSizePerMsg size
-	readBuffer := make([]byte, 65535)
+	readBuffer := make([]byte, 10000000)
 
 	for {
 		if err := client.Read(sizeBuffer); err != nil {
@@ -215,7 +223,7 @@ func (s *RaftServer) processPeerMessages(client *shared.Client) {
 
 func (s *RaftServer) runRaftLoop() {
 	s.waitGroup.Wait()
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 
 	fmt.Println("Gets here?")
@@ -234,12 +242,12 @@ func (s *RaftServer) handleReady(rd raft.Ready) {
 	if len(rd.Entries) > 0 {
 		s.appendEntries(rd.Entries)
 	}
-
-	s.sendMessages(rd.Messages)
-
-	if !raft.IsEmptySnap(rd.Snapshot) {
-		s.applySnapshot(rd.Snapshot)
-	}
+	//
+	//s.sendMessages(rd.Messages)
+	//
+	//if !raft.IsEmptySnap(rd.Snapshot) {
+	//	s.applySnapshot(rd.Snapshot)
+	//}
 
 	s.processCommittedEntries(rd.CommittedEntries)
 }
@@ -253,30 +261,30 @@ func (s *RaftServer) appendEntries(entries []raftpb.Entry) {
 var sizeBuffer = make([]byte, 4)
 
 func (s *RaftServer) sendMessages(messages []raftpb.Message) {
-	for _, msg := range messages {
-		bytes, err := msg.Marshal()
-		if err != nil {
-			log.Printf("Marshal error: %v", err)
-			continue
-		}
-
-		//fmt.Printf("Sending %d bytes\n", len(bytes))
-		binary.LittleEndian.PutUint32(sizeBuffer, uint32(len(bytes)))
-
-		connection := s.peerConnections[msg.To-1][0]
-		connection.Mutex.Lock()
-		if err := connection.Write(sizeBuffer); err != nil {
-			connection.Mutex.Unlock()
-			log.Printf("Write error: %v", err)
-			continue
-		}
-		if err := connection.Write(bytes); err != nil {
-			connection.Mutex.Unlock()
-			log.Printf("Write error: %v", err)
-			continue
-		}
-		connection.Mutex.Unlock()
-	}
+	//for _, msg := range messages {
+	//	bytes, err := msg.Marshal()
+	//	if err != nil {
+	//		log.Printf("Marshal error: %v", err)
+	//		continue
+	//	}
+	//
+	//	//fmt.Printf("Sending %d bytes\n", len(bytes))
+	//	binary.LittleEndian.PutUint32(sizeBuffer, uint32(len(bytes)))
+	//
+	//	connection := s.peerConnections[msg.To-1][0]
+	//	connection.Mutex.Lock()
+	//	if err := connection.Write(sizeBuffer); err != nil {
+	//		connection.Mutex.Unlock()
+	//		log.Printf("Write error: %v", err)
+	//		continue
+	//	}
+	//	if err := connection.Write(bytes); err != nil {
+	//		connection.Mutex.Unlock()
+	//		log.Printf("Write error: %v", err)
+	//		continue
+	//	}
+	//	connection.Mutex.Unlock()
+	//}
 }
 
 func (s *RaftServer) applySnapshot(snapshot raftpb.Snapshot) {
@@ -288,6 +296,7 @@ func (s *RaftServer) applySnapshot(snapshot raftpb.Snapshot) {
 var MESSAGES = int32(5000000)
 var COMMITTED = int32(0)
 var START = int64(0)
+var DATA_SIZE = int(10000000)
 
 func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 	for _, entry := range entries {
@@ -303,32 +312,32 @@ func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 			// Apply to state machine
 			//fmt.Printf("Commit proposal of size %d\n", len(entry.Data))
 			//fmt.Printf("Committing something %d, %d, %d\n", s.node.Status().Lead, s.config.ID, len(entry.Data))
-			if s.node.Status().Lead == s.config.ID && len(entry.Data) >= 4 {
+			if s.node.Status().Lead == s.config.ID {
 				messageId := binary.LittleEndian.Uint32(entry.Data[:4])
 				//fmt.Printf("Committing %d\n", messageId)
 				//TODO: determine whether this is correct solution
-				COMMITTED += 1
-				if COMMITTED%100000 == 0 {
-					fmt.Printf("Committing %d, %d == %d\n", messageId, COMMITTED, MESSAGES)
-				}
-				if COMMITTED == MESSAGES {
-					seconds := float64(time.Now().UnixMilli()-START) / 1000.0
-					fmt.Printf("%f OPS", float64(MESSAGES)/seconds)
-				}
-
-				//senderAny, ok := s.senders.LoadAndDelete(messageId)
-				//if ok {
-				//	sender := senderAny.(*shared.Client)
-				//	sender.Mutex.Lock()
-				//	if err := sender.Write(entry.Data[:4]); err != nil {
-				//		sender.Mutex.Unlock()
-				//		log.Printf("Write error: %v", err)
-				//		continue
-				//	} else {
-				//		sender.Mutex.Unlock()
-				//	}
-				//	fmt.Printf("Committing %d\n", messageId)
+				//COMMITTED += 1
+				//if COMMITTED%100000 == 0 {
+				//	fmt.Printf("Committing %d, %d == %d\n", COMMITTED, MESSAGES)
 				//}
+				//if COMMITTED == MESSAGES {
+				//	seconds := float64(time.Now().UnixMilli()-START) / 1000.0
+				//	fmt.Printf("%f OPS", float64(MESSAGES)/seconds)
+				//}
+
+				senderAny, ok := s.senders.LoadAndDelete(messageId)
+				if ok {
+					sender := senderAny.(*shared.Client)
+					sender.Mutex.Lock()
+					if err := sender.Write(entry.Data[:4]); err != nil {
+						sender.Mutex.Unlock()
+						log.Printf("Write error: %v", err)
+						continue
+					} else {
+						sender.Mutex.Unlock()
+					}
+					fmt.Printf("Committing %d\n", messageId)
+				}
 			}
 		}
 	}
@@ -339,30 +348,5 @@ func Server() {
 	server.setupRaftConfig()
 	server.startNetworkListeners()
 	server.initializePeerConnections()
-
-	currentIndex := int32(0)
-	for i := 0; i < 50; i++ {
-		go func() {
-			buffer := make([]byte, 5)
-			time.Sleep(5 * time.Second)
-			START = time.Now().UnixMilli()
-			fmt.Println("Started proposing")
-			for {
-				index := atomic.AddInt32(&currentIndex, 1)
-				if index > MESSAGES {
-					break
-				}
-				binary.LittleEndian.PutUint32(buffer, uint32(index))
-				//copyBuffer := make([]byte, 5)
-				//copy(copyBuffer, buffer)
-				err := server.node.Propose(context.TODO(), buffer)
-				if err != nil {
-					fmt.Println("Error proposing")
-					return
-				}
-			}
-		}()
-	}
-
 	server.runRaftLoop()
 }
