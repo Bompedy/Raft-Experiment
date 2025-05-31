@@ -312,7 +312,7 @@ func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 			// Apply to state machine
 			//fmt.Printf("Commit proposal of size %d\n", len(entry.Data))
 			//fmt.Printf("Committing something %d, %d, %d\n", s.node.Status().Lead, s.config.ID, len(entry.Data))
-			if s.node.Status().Lead == s.config.ID {
+			if s.node.Status().Lead == s.config.ID && len(entry.Data) >= 4 {
 				messageId := binary.LittleEndian.Uint32(entry.Data[:4])
 				//fmt.Printf("Committing %d\n", messageId)
 				//TODO: determine whether this is correct solution
