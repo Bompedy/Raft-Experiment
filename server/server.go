@@ -1,8 +1,6 @@
 package server
 
 import (
-	"math"
-	"net/http"
 	_ "net/http/pprof"
 )
 import (
@@ -37,7 +35,25 @@ type RaftServer struct {
 	waitGroup                sync.WaitGroup
 }
 
+const (
+	WarmupMsgMarker = 0xFFFF0000 // Special marker for warmup messages
+	NormalMsgMarker = 0x00000000 // Normal client messages
+)
+
 func NewRaftServer() *RaftServer {
+
+	//f, err := os.Create("cpu.prof")
+	//if err != nil {
+	//	log.Fatal(err)
+	//}
+	//defer f.Close()
+	//
+	//if err := pprof.StartCPUProfile(f); err != nil {
+	//	log.Fatal(err)
+	//}
+
+	// Stop profiling after 30 seconds
+
 	peerAddresses := strings.Split(os.Getenv("PEER_NODE_ADDRESSES"), ",")
 	s := &RaftServer{
 		numNodes:           len(peerAddresses),
@@ -50,9 +66,12 @@ func NewRaftServer() *RaftServer {
 		storage:            raft.NewMemoryStorage(),
 	}
 
-	go func() {
-		log.Println(http.ListenAndServe("10.10.1.1:6060", nil))
-	}()
+	start := time.Now()
+	fmt.Printf("Warmup took %v\n", time.Since(start))
+
+	//go func() {
+	//	log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
+	//}()
 
 	fmt.Println("=== Server Configuration ===")
 	fmt.Printf("NODE_ID:                     %d\n", s.nodeID)
@@ -65,14 +84,26 @@ func NewRaftServer() *RaftServer {
 	return s
 }
 
+func (s *RaftServer) warmup() {
+	warmupData := make([]byte, 8)
+	binary.LittleEndian.PutUint32(warmupData[0:4], WarmupMsgMarker)
+
+	for i := 0; i < 1000000; i++ { // Send enough to warm up all components
+		binary.LittleEndian.PutUint32(warmupData[4:8], uint32(i)) // Sequence number
+		if err := s.node.Propose(context.TODO(), warmupData); err != nil {
+			log.Printf("Warmup proposal failed: %v", err)
+		}
+	}
+}
+
 func (s *RaftServer) setupRaftConfig() {
 	s.config = &raft.Config{
 		ID:              uint64(s.nodeID),
 		ElectionTick:    10,
 		HeartbeatTick:   1,
 		Storage:         s.storage,
-		MaxSizePerMsg:   math.MaxUint64,
-		MaxInflightMsgs: 5000000,
+		MaxSizePerMsg:   65535,
+		MaxInflightMsgs: 1000,
 	}
 
 	peers := make([]raft.Peer, s.numNodes)
@@ -104,6 +135,10 @@ func (s *RaftServer) connectToPeer(address string, index int) {
 		if err != nil {
 			time.Sleep(1 * time.Second)
 			continue
+		}
+		err = conn.(*net.TCPConn).SetNoDelay(true)
+		if err != nil {
+			panic("error setting no delay")
 		}
 		client := &shared.Client{Connection: conn, Mutex: &sync.Mutex{}}
 		s.peerConnections[index] = append(s.peerConnections[index], client)
@@ -155,6 +190,7 @@ func (s *RaftServer) processClientMessages(client *shared.Client) {
 			log.Printf("Error reading size: %v", err)
 			return
 		}
+		fmt.Printf("Why did i get a lcient message?\n")
 
 		amount := binary.LittleEndian.Uint32(sizeBuffer)
 		if err := client.Read(readBuffer[:amount]); err != nil {
@@ -167,9 +203,37 @@ func (s *RaftServer) processClientMessages(client *shared.Client) {
 			s.senders.Store(messageId, client)
 			bufferCopy := make([]byte, amount)
 			copy(bufferCopy, readBuffer[:amount])
+
 			if err := s.node.Propose(context.TODO(), bufferCopy); err != nil {
 				log.Printf("Proposal error: %v", err)
 			}
+
+			//go func() {
+			//	if err := s.node.Propose(context.TODO(), bufferCopy); err != nil {
+			//		log.Printf("Proposal error: %v", err)
+			//	}
+			//}()
+
+			//select {
+			//case proposalChan <- bufferCopy:
+			//default:
+			//	log.Println("Proposal queue full - dropping message")
+			//}
+			//cli, ok := s.senders.LoadAndDelete(messageId)
+			//if !ok {
+			//	panic("some sorta error!")
+			//}
+			//
+			//go func() {
+			//	test := make([]byte, 4)
+			//	cli.(*shared.Client).Mutex.Lock()
+			//	binary.LittleEndian.PutUint32(test[:4], uint32(messageId))
+			//	err := cli.(*shared.Client).Write(test)
+			//	if err != nil {
+			//		panic("Write error!")
+			//	}
+			//	cli.(*shared.Client).Mutex.Unlock()
+			//}()
 		} else {
 			log.Println("Non-leader received client message")
 		}
@@ -243,11 +307,11 @@ func (s *RaftServer) handleReady(rd raft.Ready) {
 		s.appendEntries(rd.Entries)
 	}
 	//
-	//s.sendMessages(rd.Messages)
-	//
-	//if !raft.IsEmptySnap(rd.Snapshot) {
-	//	s.applySnapshot(rd.Snapshot)
-	//}
+	s.sendMessages(rd.Messages)
+
+	if !raft.IsEmptySnap(rd.Snapshot) {
+		s.applySnapshot(rd.Snapshot)
+	}
 
 	s.processCommittedEntries(rd.CommittedEntries)
 }
@@ -261,30 +325,30 @@ func (s *RaftServer) appendEntries(entries []raftpb.Entry) {
 var sizeBuffer = make([]byte, 4)
 
 func (s *RaftServer) sendMessages(messages []raftpb.Message) {
-	//for _, msg := range messages {
-	//	bytes, err := msg.Marshal()
-	//	if err != nil {
-	//		log.Printf("Marshal error: %v", err)
-	//		continue
-	//	}
-	//
-	//	//fmt.Printf("Sending %d bytes\n", len(bytes))
-	//	binary.LittleEndian.PutUint32(sizeBuffer, uint32(len(bytes)))
-	//
-	//	connection := s.peerConnections[msg.To-1][0]
-	//	connection.Mutex.Lock()
-	//	if err := connection.Write(sizeBuffer); err != nil {
-	//		connection.Mutex.Unlock()
-	//		log.Printf("Write error: %v", err)
-	//		continue
-	//	}
-	//	if err := connection.Write(bytes); err != nil {
-	//		connection.Mutex.Unlock()
-	//		log.Printf("Write error: %v", err)
-	//		continue
-	//	}
-	//	connection.Mutex.Unlock()
-	//}
+	for _, msg := range messages {
+		bytes, err := msg.Marshal()
+		if err != nil {
+			log.Printf("Marshal error: %v", err)
+			continue
+		}
+
+		//fmt.Printf("Sending %d bytes\n", len(bytes))
+		binary.LittleEndian.PutUint32(sizeBuffer, uint32(len(bytes)))
+
+		connection := s.peerConnections[msg.To-1][0]
+		connection.Mutex.Lock()
+		if err := connection.Write(sizeBuffer); err != nil {
+			connection.Mutex.Unlock()
+			log.Printf("Write error: %v", err)
+			continue
+		}
+		if err := connection.Write(bytes); err != nil {
+			connection.Mutex.Unlock()
+			log.Printf("Write error: %v", err)
+			continue
+		}
+		connection.Mutex.Unlock()
+	}
 }
 
 func (s *RaftServer) applySnapshot(snapshot raftpb.Snapshot) {
@@ -312,7 +376,7 @@ func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 			// Apply to state machine
 			//fmt.Printf("Commit proposal of size %d\n", len(entry.Data))
 			//fmt.Printf("Committing something %d, %d, %d\n", s.node.Status().Lead, s.config.ID, len(entry.Data))
-			if s.node.Status().Lead == s.config.ID && len(entry.Data) >= 4 {
+			if len(entry.Data) >= 4 && s.node.Status().Lead == s.config.ID {
 				messageId := binary.LittleEndian.Uint32(entry.Data[:4])
 				//fmt.Printf("Committing %d\n", messageId)
 				//TODO: determine whether this is correct solution
@@ -327,16 +391,19 @@ func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 
 				senderAny, ok := s.senders.LoadAndDelete(messageId)
 				if ok {
-					sender := senderAny.(*shared.Client)
-					sender.Mutex.Lock()
-					if err := sender.Write(entry.Data[:4]); err != nil {
-						sender.Mutex.Unlock()
-						log.Printf("Write error: %v", err)
-						continue
-					} else {
-						sender.Mutex.Unlock()
-					}
+					go func() {
+						sender := senderAny.(*shared.Client)
+						sender.Mutex.Lock()
+						if err := sender.Write(entry.Data[:4]); err != nil {
+							sender.Mutex.Unlock()
+							log.Printf("Write error: %v", err)
+						} else {
+							sender.Mutex.Unlock()
+						}
+					}()
 					//fmt.Printf("Committing %d\n", messageId)
+				} else {
+					panic("THERE WAS A BAD PROBLEM")
 				}
 			}
 		}
@@ -348,5 +415,13 @@ func Server() {
 	server.setupRaftConfig()
 	server.startNetworkListeners()
 	server.initializePeerConnections()
+
+	go func() {
+		for {
+			time.Sleep(5 * time.Second)
+			fmt.Printf("Is leader?: %b - %b\n", server.node.Status().Lead, server.config.ID)
+		}
+	}()
+
 	server.runRaftLoop()
 }

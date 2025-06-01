@@ -11,7 +11,20 @@ import (
 	"time"
 )
 
+import _ "net/http/pprof"
+
 func Client() {
+	//f, err := os.Create("cpu.prof")
+	//if err != nil {
+	//	panic(err)
+	//}
+	//defer f.Close()
+	//
+	//if err := pprof.StartCPUProfile(f); err != nil {
+	//	panic(err)
+	//}
+	//defer pprof.StopCPUProfile()
+
 	closedLoop := os.Getenv("CLOSED_LOOP")
 	if closedLoop != "true" && closedLoop != "false" {
 		panic("Must specify CLOSED_LOOP: (true|false)")
@@ -39,6 +52,10 @@ func Client() {
 			if err != nil {
 				time.Sleep(1 * time.Second)
 				continue
+			}
+			err = conn.(*net.TCPConn).SetNoDelay(true)
+			if err != nil {
+				panic("error setting no delay")
 			}
 			//fmt.Printf("Connected to %s\n", address)
 			client := &shared.Client{Connection: conn, Mutex: &sync.Mutex{}}
@@ -102,8 +119,8 @@ func Client() {
 		for i := range connections {
 			connection := connections[i]
 			go func() {
+				buffer := make([]byte, 4)
 				for {
-					buffer := make([]byte, 4)
 					err := connection.Read(buffer)
 					if err != nil {
 						panic(err)
