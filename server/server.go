@@ -232,7 +232,7 @@ func (s *RaftServer) handleClientWrites(conn net.Conn, writeChan chan []byte) {
 
 func (s *RaftServer) processClientMessages(writeChannel *chan []byte, conn net.Conn) {
 	readBuffer := make([]byte, s.dataSize+4)
-	proposalChannel := make(chan []byte, 10000)
+	proposalChannel := make(chan []byte, 3000000)
 
 	go func() {
 		defer func() {
