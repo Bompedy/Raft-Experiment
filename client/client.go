@@ -61,7 +61,7 @@ func Client() {
 			if err != nil {
 				panic("error setting no delay")
 			}
-			writeChan := make(chan []byte, 500000)
+			writeChan := make(chan []byte, 1000000)
 
 			connections[i] = &ClientConnection{&conn, &writeChan}
 			go writeChannel(&pool, conn, writeChan)
