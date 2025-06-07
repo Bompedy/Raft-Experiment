@@ -1,7 +1,7 @@
 #!/bin/bash
 
 if [ "$#" -ne 6 ]; then
-    echo "Usage: $0 <NODE_ID> <DATA_SIZE> <NUM_PEER_CONNECTIONS> <HOST_NODE_ADDRESS> <CLIENT_NODE_ADDRESS> <PEER_NODE_ADDRESSES>"
+    echo "Usage: $0 <NODE_ID> <DATA_SIZE> <NUM_PEER_CONNECTIONS> <HOST_NODE_ADDRESS> <CLIENT_NODE_ADDRESS> <PEER_NODE_ADDRESSES> <POOL_WARMUP_SIZE>"
     exit 1
 fi
 
@@ -11,6 +11,7 @@ NUM_PEER_CONNECTIONS=$3
 HOST_NODE_ADDRESS=$4
 CLIENT_NODE_ADDRESS=$5
 PEER_NODE_ADDRESSES=$6
+POOL_WARMUP_SIZE=$7
 
 cd /local/Raft-Experiment || { echo "Failed to cd to /local/Raft-Experiment"; exit 1; }
 
@@ -27,5 +28,6 @@ export NUM_PEER_CONNECTIONS
 export HOST_NODE_ADDRESS
 export CLIENT_NODE_ADDRESS
 export PEER_NODE_ADDRESSES
+export POOL_WARMUP_SIZE
 
 ./raftlib server
