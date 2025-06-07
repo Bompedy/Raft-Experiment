@@ -110,13 +110,15 @@ func NewRaftServer() *RaftServer {
 
 func (s *RaftServer) warmup() {
 	warmupData := make([]byte, 8)
-	binary.LittleEndian.PutUint32(warmupData[0:4], WarmupMsgMarker)
-
-	for i := 0; i < 1000000; i++ { // Send enough to warm up all components
-		binary.LittleEndian.PutUint32(warmupData[4:8], uint32(i)) // Sequence number
-		if err := s.node.Propose(context.TODO(), warmupData); err != nil {
-			log.Printf("Warmup proposal failed: %v", err)
-		}
+	for range 10 {
+		go func() {
+			for i := 0; i < 500000; i++ {
+				binary.LittleEndian.PutUint32(warmupData, uint32(i))
+				if err := s.node.Propose(context.TODO(), warmupData); err != nil {
+					log.Printf("Warmup proposal failed: %v", err)
+				}
+			}
+		}()
 	}
 }
 
@@ -325,6 +327,9 @@ func (s *RaftServer) handleReady(rd raft.Ready) {
 	s.processCommittedEntries(rd.CommittedEntries)
 }
 
+var COMMITTED = 0
+var START time.Time
+
 func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 	for _, entry := range entries {
 		switch entry.Type {
@@ -337,21 +342,36 @@ func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 			s.node.ApplyConfChange(cc)
 		case raftpb.EntryNormal:
 			if len(entry.Data) >= 4 && s.node.Status().Lead == s.config.ID {
-				messageId := binary.LittleEndian.Uint32(entry.Data[:4])
+				//messageId := binary.LittleEndian.Uint32(entry.Data[:4])
 				//log.Printf("loading messageid: %d\n", messageId)
-				senderAny, ok := s.senders.LoadAndDelete(messageId)
-				if ok {
-					sender := senderAny.(*ClientOp)
-					channel := *sender.channel
-					select {
-					case channel <- *sender.data:
-					default:
-						log.Printf("Client write channel is full, dropping message?")
-					}
-					//fmt.Printf("Committing %d\n", messageId)
-				} else {
-					log.Panicf("PROBLEM LOADING SENDER FOR %d", messageId)
+
+				if COMMITTED == 0 {
+					fmt.Printf("Starting benchmark\n")
+					START = time.Now()
 				}
+
+				COMMITTED += 1
+				if COMMITTED%10000 == 0 {
+					fmt.Printf("Index %d\n", COMMITTED)
+				}
+				if COMMITTED == 5000000 {
+					total := time.Since(START)
+					ops := 5000000 / total.Seconds()
+					fmt.Printf("Total OPS: %f\n", ops)
+				}
+				//senderAny, ok := s.senders.LoadAndDelete(messageId)
+				//if ok {
+				//	sender := senderAny.(*ClientOp)
+				//	channel := *sender.channel
+				//	select {
+				//	case channel <- *sender.data:
+				//	default:
+				//		log.Printf("Client write channel is full, dropping message?")
+				//	}
+				//	//fmt.Printf("Committing %d\n", messageId)
+				//} else {
+				//	log.Panicf("PROBLEM LOADING SENDER FOR %d", messageId)
+				//}
 			}
 		}
 	}
@@ -446,6 +466,9 @@ func Server() {
 	server.setupRaftConfig()
 	server.startNetworkListeners()
 	server.initializePeerConnections()
-
+	go func() {
+		time.Sleep(5 * time.Second)
+		server.warmup()
+	}()
 	server.runRaftLoop()
 }
