@@ -1,6 +1,6 @@
 #!/bin/bash
 
-if [ "$#" -ne 6 ]; then
+if [ "$#" -ne 7 ]; then
     echo "Usage: $0 <NODE_ID> <DATA_SIZE> <NUM_PEER_CONNECTIONS> <HOST_NODE_ADDRESS> <CLIENT_NODE_ADDRESS> <PEER_NODE_ADDRESSES> <POOL_WARMUP_SIZE>"
     exit 1
 fi
