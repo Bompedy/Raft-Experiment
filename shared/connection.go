@@ -4,17 +4,11 @@ import (
 	"net"
 	"os"
 	"strconv"
-	"sync"
 )
 
-type Client struct {
-	Connection net.Conn
-	Mutex      *sync.Mutex
-}
-
-func (client Client) Read(buffer []byte) error {
+func Read(connection net.Conn, buffer []byte) error {
 	for start := 0; start != len(buffer); {
-		amount, reason := client.Connection.Read(buffer[start:])
+		amount, reason := connection.Read(buffer[start:])
 		if reason != nil {
 			return reason
 		}
@@ -22,9 +16,9 @@ func (client Client) Read(buffer []byte) error {
 	}
 	return nil
 }
-func (client Client) Write(buffer []byte) error {
+func Write(connection net.Conn, buffer []byte) error {
 	for start := 0; start != len(buffer); {
-		amount, reason := client.Connection.Write(buffer[start:])
+		amount, reason := connection.Write(buffer[start:])
 		if reason != nil {
 			return reason
 		}
