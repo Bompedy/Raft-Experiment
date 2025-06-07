@@ -129,7 +129,7 @@ func (s *RaftServer) setupRaftConfig() {
 		HeartbeatTick:             1,
 		Storage:                   s.storage,
 		MaxSizePerMsg:             math.MaxUint32,
-		MaxInflightMsgs:           5000000,
+		MaxInflightMsgs:           1000000,
 		MaxUncommittedEntriesSize: 0,
 		MaxCommittedSizePerReady:  1000000,
 	}
@@ -204,7 +204,7 @@ func (s *RaftServer) handleClientConnections(listener net.Listener) {
 		}
 
 		log.Println("Client connected")
-		writeChan := make(chan []byte, 1000000)
+		writeChan := make(chan []byte, 100000)
 		go s.handleClientWrites(conn, writeChan)
 		go s.processClientMessages(&writeChan, conn)
 	}
@@ -232,19 +232,21 @@ func (s *RaftServer) handleClientWrites(conn net.Conn, writeChan chan []byte) {
 
 func (s *RaftServer) processClientMessages(writeChannel *chan []byte, conn net.Conn) {
 	readBuffer := make([]byte, s.dataSize+4)
-	proposalChannel := make(chan []byte, 1000000)
+	proposalChannel := make(chan []byte, 10000)
 
 	go func() {
+		defer func() {
+			close(proposalChannel)
+			conn.Close()
+		}()
+
+		fmt.Printf("Setup proposal channel")
+
 		for data := range proposalChannel {
 			if err := s.node.Propose(context.TODO(), data); err != nil {
 				log.Printf("Proposal error: %v", err)
 			}
 		}
-
-		defer func() {
-			close(proposalChannel)
-			conn.Close()
-		}()
 	}()
 
 	for {
@@ -270,7 +272,7 @@ func (s *RaftServer) processClientMessages(writeChannel *chan []byte, conn net.C
 				channel:    writeChannel,
 				data:       &bufferCopy,
 			})
-			//
+
 			//senderAny, ok := s.senders.LoadAndDelete(messageId)
 			//if ok {
 			//	sender := senderAny.(*ClientOp)
@@ -298,7 +300,7 @@ func (s *RaftServer) processClientMessages(writeChannel *chan []byte, conn net.C
 
 func (s *RaftServer) runRaftLoop() {
 	s.waitGroup.Wait()
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 
 	fmt.Println("Gets here?")
@@ -342,36 +344,36 @@ func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 			s.node.ApplyConfChange(cc)
 		case raftpb.EntryNormal:
 			if len(entry.Data) >= 4 && s.node.Status().Lead == s.config.ID {
-				//messageId := binary.LittleEndian.Uint32(entry.Data[:4])
+				messageId := binary.LittleEndian.Uint32(entry.Data[:4])
 				//log.Printf("loading messageid: %d\n", messageId)
 
-				if COMMITTED == 0 {
-					fmt.Printf("Starting benchmark\n")
-					START = time.Now()
-				}
-
-				COMMITTED += 1
-				if COMMITTED%10000 == 0 {
-					fmt.Printf("Index %d\n", COMMITTED)
-				}
-				if COMMITTED == 5000000 {
-					total := time.Since(START)
-					ops := 5000000 / total.Seconds()
-					fmt.Printf("Total OPS: %f\n", ops)
-				}
-				//senderAny, ok := s.senders.LoadAndDelete(messageId)
-				//if ok {
-				//	sender := senderAny.(*ClientOp)
-				//	channel := *sender.channel
-				//	select {
-				//	case channel <- *sender.data:
-				//	default:
-				//		log.Printf("Client write channel is full, dropping message?")
-				//	}
-				//	//fmt.Printf("Committing %d\n", messageId)
-				//} else {
-				//	log.Panicf("PROBLEM LOADING SENDER FOR %d", messageId)
+				//if COMMITTED == 0 {
+				//	fmt.Printf("Starting benchmark\n")
+				//	START = time.Now()
 				//}
+				//
+				//COMMITTED += 1
+				//if COMMITTED%10000 == 0 {
+				//	fmt.Printf("Index %d\n", COMMITTED)
+				//}
+				//if COMMITTED == 5000000 {
+				//	total := time.Since(START)
+				//	ops := 5000000 / total.Seconds()
+				//	fmt.Printf("Total OPS: %f\n", ops)
+				//}
+				senderAny, ok := s.senders.LoadAndDelete(messageId)
+				if ok {
+					sender := senderAny.(*ClientOp)
+					channel := *sender.channel
+					select {
+					case channel <- *sender.data:
+					default:
+						log.Printf("Client write channel is full, dropping message?")
+					}
+					//fmt.Printf("Committing %d\n", messageId)
+				} else {
+					log.Panicf("PROBLEM LOADING SENDER FOR %d", messageId)
+				}
 			}
 		}
 	}
@@ -466,9 +468,9 @@ func Server() {
 	server.setupRaftConfig()
 	server.startNetworkListeners()
 	server.initializePeerConnections()
-	go func() {
-		time.Sleep(5 * time.Second)
-		server.warmup()
-	}()
+	//go func() {
+	//	time.Sleep(5 * time.Second)
+	//	server.warmup()
+	//}()
 	server.runRaftLoop()
 }
