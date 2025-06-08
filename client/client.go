@@ -70,6 +70,51 @@ func Client() {
 	}
 
 	if closedLoop == "true" {
+		opsPerClient := numOps / numClients
+		var startGroup sync.WaitGroup
+		var endGroup sync.WaitGroup
+		startGroup.Add(numClients)
+		endGroup.Add(numClients)
+
+		for i := range connections {
+			client := connections[i]
+			connection := *client.connection
+			go func(clientId int) {
+				startOp := clientId * opsPerClient
+				buffer := make([]byte, 8)
+				startGroup.Done()
+				startGroup.Wait()
+				for index := range opsPerClient {
+
+					op := startOp + index
+					binary.LittleEndian.PutUint32(buffer, uint32(4))
+					binary.LittleEndian.PutUint32(buffer[4:], uint32(startOp+op))
+					err := shared.Write(connection, buffer)
+					if err != nil {
+						panic(err)
+					}
+					err = shared.Read(connection, buffer[:4])
+					if err != nil {
+						panic(err)
+					}
+
+				}
+				endGroup.Done()
+			}(i)
+		}
+
+		startGroup.Wait()
+		start := time.Now()
+		fmt.Printf("Starting benchmark!\n")
+
+		endGroup.Wait()
+		total := time.Since(start)
+		ops := float64(numOps) / total.Seconds()
+		fmt.Printf("Total clients: %d\n", numClients)
+		fmt.Printf("Total operations: %d\n", numOps)
+		fmt.Printf("Total time taken: %v\n", total)
+		fmt.Printf("Data size: %d bytes\n", dataSize)
+		fmt.Printf("OPS: %.4f ops/sec\n", ops)
 	} else {
 		completeChannel := make(chan struct{})
 		var completedOps atomic.Uint64

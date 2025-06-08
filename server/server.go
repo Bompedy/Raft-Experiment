@@ -273,25 +273,25 @@ func (s *RaftServer) processClientMessages(writeChannel *chan []byte, conn net.C
 				data:       &bufferCopy,
 			})
 
-			senderAny, ok := s.senders.LoadAndDelete(messageId)
-			if ok {
-				sender := senderAny.(*ClientOp)
-				channel := *sender.channel
-				select {
-				case channel <- *sender.data:
-				default:
-					log.Printf("Client write channel is full, dropping message?")
-				}
-				//fmt.Printf("Committing %d\n", messageId)
-			} else {
-				log.Panicf("PROBLEM LOADING SENDER FOR %d", messageId)
-			}
-
-			//select {
-			//case proposalChannel <- bufferCopy[:amount]:
-			//default:
-			//	log.Printf("Proposal channel is full, dropping message?")
+			//senderAny, ok := s.senders.LoadAndDelete(messageId)
+			//if ok {
+			//	sender := senderAny.(*ClientOp)
+			//	channel := *sender.channel
+			//	select {
+			//	case channel <- *sender.data:
+			//	default:
+			//		log.Printf("Client write channel is full, dropping message?")
+			//	}
+			//	//fmt.Printf("Committing %d\n", messageId)
+			//} else {
+			//	log.Panicf("PROBLEM LOADING SENDER FOR %d", messageId)
 			//}
+
+			select {
+			case proposalChannel <- bufferCopy[:amount]:
+			default:
+				log.Printf("Proposal channel is full, dropping message?")
+			}
 		} else {
 			log.Println("Non-leader received client message")
 		}
