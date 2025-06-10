@@ -25,7 +25,7 @@ func Client() {
 		panic("Must specify CLOSED_LOOP: (true|false)")
 	}
 
-	numThreads := shared.GetEnvInt("NUM_THREADS", 1)
+	//numThreads := shared.GetEnvInt("NUM_THREADS", 1)
 	numClients := shared.GetEnvInt("NUM_CLIENTS", 1)
 	dataSize := shared.GetEnvInt("DATA_SIZE", 1)
 	poolWarmupSize := shared.GetEnvInt("POOL_WARMUP_SIZE", 1)
@@ -44,7 +44,7 @@ func Client() {
 
 	fmt.Println("=== Client Configuration ===")
 	fmt.Printf("CLOSED_LOOP:              %s\n", closedLoop)
-	fmt.Printf("NUM_THREADS:              %d\n", numThreads)
+	//fmt.Printf("NUM_THREADS:              %d\n", numThreads)
 	fmt.Printf("NUM_CLIENTS:              %d\n", numClients)
 	fmt.Printf("DATA_SIZE:                %d\n", dataSize)
 	fmt.Printf("NUM_OPS:                  %d\n", numOps)
@@ -57,12 +57,16 @@ func Client() {
 				time.Sleep(1 * time.Second)
 				continue
 			}
+			tcpConn := conn.(*net.TCPConn)
+			err = tcpConn.SetNoDelay(true)
+			if err != nil {
+				return
+			}
 			err = conn.(*net.TCPConn).SetNoDelay(true)
 			if err != nil {
 				panic("error setting no delay")
 			}
 			writeChan := make(chan []byte, 3000000)
-
 			connections[i] = &ClientConnection{&conn, &writeChan}
 			go writeChannel(&pool, conn, writeChan)
 			break
@@ -75,7 +79,6 @@ func Client() {
 		var endGroup sync.WaitGroup
 		startGroup.Add(numClients)
 		endGroup.Add(numClients)
-
 		for i := range connections {
 			client := connections[i]
 			connection := *client.connection
@@ -85,7 +88,6 @@ func Client() {
 				startGroup.Done()
 				startGroup.Wait()
 				for index := range opsPerClient {
-
 					op := startOp + index
 					binary.LittleEndian.PutUint32(buffer, uint32(4))
 					binary.LittleEndian.PutUint32(buffer[4:], uint32(startOp+op))
@@ -97,7 +99,6 @@ func Client() {
 					if err != nil {
 						panic(err)
 					}
-
 				}
 				endGroup.Done()
 			}(i)
@@ -160,6 +161,10 @@ func Client() {
 					}
 					//fmt.Printf("%d: %d\n", threadId, startOp+op)
 
+					if op%10000 == 0 {
+						fmt.Printf("%d\n", op)
+					}
+
 					client := connections[clientId]
 					channel := *client.channel
 					select {
@@ -170,33 +175,6 @@ func Client() {
 				}
 			}(i)
 		}
-
-		//for i := 0; i < numThreads; i++ {
-		//	go func(threadId int) {
-		//		//connectionIndex := threadId % numClients
-		//		startOp := threadId * opsPerClient
-		//
-		//		//buffer := make([]byte, dataSize+8)
-		//		startGroup.Done()
-		//		startGroup.Wait()
-		//
-		//		for op := range opsPerClient {
-		//			buffer := pool.Get().([]byte)
-		//			binary.LittleEndian.PutUint32(buffer, uint32(4))
-		//			binary.LittleEndian.PutUint32(buffer[4:], uint32(startOp+op))
-		//			//fmt.Printf("%d: %d\n", threadId, startOp+op)
-		//
-		//			client := connections[connectionIndex]
-		//			connectionIndex = (connectionIndex + 1) % numClients
-		//			channel := *client.channel
-		//			select {
-		//			case channel <- buffer[:8]:
-		//			default:
-		//				log.Printf("Client write channel is full, dropping message?")
-		//			}
-		//		}
-		//	}(i)
-		//}
 
 		startGroup.Wait()
 		start := time.Now()

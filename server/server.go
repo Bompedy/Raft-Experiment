@@ -30,12 +30,16 @@ type RaftServer struct {
 	clientNodeAddress        string
 	pool                     *sync.Pool
 	peerNodeAddresses        []string
-	peerConnections          [][]*net.Conn
+	peerConnections          [][]net.Conn
+	stepChannels             [][]chan raftpb.Message
+	writeChannels            [][]chan ClientWrite
 	senders                  sync.Map
+	times                    sync.Map
 	node                     raft.Node
 	storage                  *raft.MemoryStorage
 	config                   *raft.Config
-	waitGroup                sync.WaitGroup
+	listenerGroup            sync.WaitGroup
+	connectGroup             sync.WaitGroup
 }
 
 const (
@@ -47,6 +51,11 @@ type ClientOp struct {
 	connection *net.Conn
 	channel    *chan []byte
 	data       *[]byte
+}
+
+type ClientWrite struct {
+	buffer *[]byte
+	size   int
 }
 
 func NewRaftServer() *RaftServer {
@@ -67,9 +76,10 @@ func NewRaftServer() *RaftServer {
 	dataSize := shared.GetEnvInt("DATA_SIZE", 1)
 	poolWarmupSize := shared.GetEnvInt("POOL_WARMUP_SIZE", 1)
 
+	//TODO: I allocate more here because we need it for marshalling messages, maybe want a new pool
 	var pool = sync.Pool{
 		New: func() interface{} {
-			return make([]byte, dataSize)
+			return make([]byte, dataSize+1024)
 		},
 	}
 
@@ -125,7 +135,7 @@ func (s *RaftServer) warmup() {
 func (s *RaftServer) setupRaftConfig() {
 	s.config = &raft.Config{
 		ID:                        uint64(s.nodeID),
-		ElectionTick:              10,
+		ElectionTick:              20,
 		HeartbeatTick:             1,
 		Storage:                   s.storage,
 		MaxSizePerMsg:             math.MaxUint32,
@@ -142,43 +152,55 @@ func (s *RaftServer) setupRaftConfig() {
 }
 
 func (s *RaftServer) initializePeerConnections() {
-	//s.peerConnections = make([][]*shared.Client, s.numNodes)
-	//for i := range s.peerConnections {
-	//	s.peerConnections[i] = make([]*shared.Client, 0)
-	//}
-	//
-	//for i, nodeAddress := range s.peerNodeAddresses {
-	//	if nodeAddress == s.hostNodeAddress {
-	//		continue
-	//	}
-	//	s.connectToPeer(nodeAddress, i)
-	//}
-	//
-	//fmt.Printf("Made all peer connections!\n")
+	s.peerConnections = make([][]net.Conn, s.numNodes)
+	for i := range s.peerConnections {
+		s.peerConnections[i] = make([]net.Conn, 0)
+	}
+	s.stepChannels = make([][]chan raftpb.Message, s.numNodes)
+	for i := range s.stepChannels {
+		s.stepChannels[i] = make([]chan raftpb.Message, 0)
+	}
+	s.writeChannels = make([][]chan ClientWrite, s.numNodes)
+	for i := range s.writeChannels {
+		s.writeChannels[i] = make([]chan ClientWrite, 0)
+	}
+
+	for i, nodeAddress := range s.peerNodeAddresses {
+		if nodeAddress == s.hostNodeAddress {
+			continue
+		}
+		s.connectToPeer(nodeAddress, i)
+	}
+
+	fmt.Printf("Made all peer connections!\n")
 }
 
 func (s *RaftServer) connectToPeer(address string, index int) {
-	//for {
-	//	conn, err := net.Dial("tcp", address)
-	//	if err != nil {
-	//		time.Sleep(1 * time.Second)
-	//		continue
-	//	}
-	//	err = conn.(*net.TCPConn).SetNoDelay(true)
-	//	if err != nil {
-	//		panic("error setting no delay")
-	//	}
-	//	client := &shared.Client{Connection: conn, Mutex: &sync.Mutex{}}
-	//	s.peerConnections[index] = append(s.peerConnections[index], client)
-	//	if len(s.peerConnections[index]) != s.numPeerConnections {
-	//		continue
-	//	}
-	//	break
-	//}
+	for {
+		conn, err := net.Dial("tcp", address)
+		if err != nil {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		err = conn.(*net.TCPConn).SetNoDelay(true)
+		if err != nil {
+			panic("error setting no delay")
+		}
+		s.peerConnections[index] = append(s.peerConnections[index], conn)
+		s.stepChannels[index] = append(s.stepChannels[index], make(chan raftpb.Message, 100000))
+		s.writeChannels[index] = append(s.writeChannels[index], make(chan ClientWrite, 100000))
+		fmt.Printf("connectToPeer %d, %d\n", index, len(s.stepChannels[index]))
+		s.connectGroup.Done()
+		if len(s.peerConnections[index]) != s.numPeerConnections {
+			continue
+		}
+		break
+	}
 }
 
 func (s *RaftServer) startNetworkListeners() {
-	s.waitGroup.Add((s.numNodes * s.numPeerConnections) - s.numPeerConnections)
+	s.listenerGroup.Add((s.numNodes * s.numPeerConnections) - s.numPeerConnections)
+	s.connectGroup.Add((s.numNodes * s.numPeerConnections) - s.numPeerConnections)
 
 	peerListener := s.createListener(s.hostNodeAddress)
 	clientListener := s.createListener(s.clientNodeAddress)
@@ -203,6 +225,12 @@ func (s *RaftServer) handleClientConnections(listener net.Listener) {
 			continue
 		}
 
+		tcpConn := conn.(*net.TCPConn)
+		err = tcpConn.SetNoDelay(true)
+		if err != nil {
+			return
+		}
+
 		log.Println("Client connected")
 		writeChan := make(chan []byte, 100000)
 		go s.handleClientWrites(conn, writeChan)
@@ -221,8 +249,6 @@ func (s *RaftServer) handleClientWrites(conn net.Conn, writeChan chan []byte) {
 
 	for msg := range writeChan {
 		err := shared.Write(conn, msg[:4])
-		//length := len(msg)
-		//id := binary.LittleEndian.Uint32(msg[:4])
 		if err != nil {
 			panic(err)
 		}
@@ -264,6 +290,9 @@ func (s *RaftServer) processClientMessages(writeChannel *chan []byte, conn net.C
 
 		if s.node.Status().Lead == s.config.ID {
 			messageId := binary.LittleEndian.Uint32(readBuffer[:4])
+
+			//s.times.Store(messageId, time.Now().UnixNano())
+
 			bufferCopy := s.pool.Get().([]byte)
 			copy(bufferCopy, readBuffer[:amount])
 			//log.Printf("stroing messageid: %d\n", messageId)
@@ -272,7 +301,6 @@ func (s *RaftServer) processClientMessages(writeChannel *chan []byte, conn net.C
 				channel:    writeChannel,
 				data:       &bufferCopy,
 			})
-
 			//senderAny, ok := s.senders.LoadAndDelete(messageId)
 			//if ok {
 			//	sender := senderAny.(*ClientOp)
@@ -299,8 +327,13 @@ func (s *RaftServer) processClientMessages(writeChannel *chan []byte, conn net.C
 }
 
 func (s *RaftServer) runRaftLoop() {
-	s.waitGroup.Wait()
-	ticker := time.NewTicker(5 * time.Millisecond)
+	s.listenerGroup.Wait()
+	s.connectGroup.Wait()
+
+	go s.handlePeerStep()
+	go s.handlePeerWrite()
+
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	fmt.Println("Gets here?")
@@ -319,8 +352,7 @@ func (s *RaftServer) handleReady(rd raft.Ready) {
 	if len(rd.Entries) > 0 {
 		s.appendEntries(rd.Entries)
 	}
-	//
-	//s.sendMessages(rd.Messages)
+	s.sendPeerMessages(rd.Messages)
 
 	if !raft.IsEmptySnap(rd.Snapshot) {
 		s.applySnapshot(rd.Snapshot)
@@ -328,9 +360,6 @@ func (s *RaftServer) handleReady(rd raft.Ready) {
 
 	s.processCommittedEntries(rd.CommittedEntries)
 }
-
-var COMMITTED = 0
-var START time.Time
 
 func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 	for _, entry := range entries {
@@ -361,6 +390,7 @@ func (s *RaftServer) processCommittedEntries(entries []raftpb.Entry) {
 				//	ops := 5000000 / total.Seconds()
 				//	fmt.Printf("Total OPS: %f\n", ops)
 				//}
+
 				senderAny, ok := s.senders.LoadAndDelete(messageId)
 				if ok {
 					sender := senderAny.(*ClientOp)
@@ -385,32 +415,21 @@ func (s *RaftServer) appendEntries(entries []raftpb.Entry) {
 	}
 }
 
-var sizeBuffer = make([]byte, 4)
-
-func (s *RaftServer) sendMessages(messages []raftpb.Message) {
+func (s *RaftServer) sendPeerMessages(messages []raftpb.Message) {
 	for _, msg := range messages {
-		bytes, err := msg.Marshal()
+		buffer := s.pool.Get().([]byte)
+		bytes, err := msg.MarshalTo(buffer[4:])
 		if err != nil {
 			log.Printf("Marshal error: %v", err)
 			continue
 		}
-
-		//fmt.Printf("Sending %d bytes\n", len(bytes))
-		binary.LittleEndian.PutUint32(sizeBuffer, uint32(len(bytes)))
-		//
-		//connection := s.peerConnections[msg.To-1][0]
-		//connection.Mutex.Lock()
-		//if err := connection.Write(sizeBuffer); err != nil {
-		//	connection.Mutex.Unlock()
-		//	log.Printf("Write error: %v", err)
-		//	continue
-		//}
-		//if err := connection.Write(bytes); err != nil {
-		//	connection.Mutex.Unlock()
-		//	log.Printf("Write error: %v", err)
-		//	continue
-		//}
-		//connection.Mutex.Unlock()
+		//fmt.Printf("Send peer message: %d -> %d\n", msg.From, msg.To)
+		binary.LittleEndian.PutUint32(buffer[:4], uint32(bytes))
+		channel := s.writeChannels[msg.To-1][msg.Index%uint64(s.numPeerConnections)]
+		channel <- ClientWrite{
+			&buffer,
+			bytes + 4,
+		}
 	}
 }
 
@@ -419,23 +438,86 @@ func (s *RaftServer) applySnapshot(snapshot raftpb.Snapshot) {
 }
 
 func (s *RaftServer) handlePeerConnections(listener net.Listener) {
-	//for {
-	//	conn, err := listener.Accept()
-	//	if err != nil {
-	//		log.Printf("Peer connection error: %v", err)
-	//		continue
-	//	}
-	//
-	//	client := &shared.Client{Connection: conn, Mutex: &sync.Mutex{}}
-	//	go s.processPeerMessages(client)
-	//}
+	for {
+		connection, err := listener.Accept()
+		if err != nil {
+			log.Printf("Peer connection error: %v", err)
+			continue
+		}
+		go s.processPeerMessages(&connection)
+	}
 }
 
-func (s *RaftServer) processPeerMessages(client *net.Conn) {
-	s.waitGroup.Done()
+func (s *RaftServer) handlePeerStep() {
+	for n := range s.numNodes {
+		if n+1 == s.nodeID {
+			continue
+		}
+		for c := range s.numPeerConnections {
+			go func(nodeIndex int, connectionIndex int) {
+				for {
+					message := <-s.stepChannels[nodeIndex][connectionIndex]
+					//fmt.Printf("Step %s, %d, %d\n", message.Type.String(), nodeIndex, len(s.stepChannels[nodeIndex]))
+					if err := s.node.Step(context.TODO(), message); err != nil {
+						log.Printf("Proposal error: %v", err)
+					}
+				}
+			}(n, c)
+		}
+	}
+}
+
+func (s *RaftServer) handlePeerWrite() {
+	for n := range s.numNodes {
+		if n+1 == s.nodeID {
+			continue
+		}
+		for c := range s.numPeerConnections {
+			go func(nodeIndex int, connectionIndex int) {
+				for {
+					//fmt.Printf("handlePeerWrite %d, %d, %d\n", nodeIndex, len(s.peerConnections[nodeIndex]), len(s.writeChannels[nodeIndex]))
+					connection := s.peerConnections[nodeIndex][connectionIndex]
+					message := <-s.writeChannels[nodeIndex][connectionIndex]
+					err := shared.Write(connection, (*message.buffer)[:message.size])
+					if err != nil {
+						panic(err)
+					}
+					s.pool.Put(*message.buffer)
+				}
+			}(n, c)
+		}
+	}
+}
+
+func (s *RaftServer) processPeerMessages(connection *net.Conn) {
+	s.listenerGroup.Done()
+
 	//sizeBuffer := make([]byte, 4)
 	////TODO: figure out why bulking means this cant just be s.config.MaxSizePerMsg size
-	//readBuffer := make([]byte, 10000000)
+	buffer := make([]byte, 1024)
+
+	for {
+		err := shared.Read(*connection, buffer[:4])
+		if err != nil {
+			panic(err)
+		}
+		size := binary.LittleEndian.Uint32(buffer[:4])
+		//fmt.Printf("size: %d\n", size)
+		err = shared.Read(*connection, buffer[:size])
+		if err != nil {
+			panic(err)
+		}
+		var msg raftpb.Message
+		if err := msg.Unmarshal(buffer[:size]); err != nil {
+			log.Printf("Unmarshal error: %v", err)
+			continue
+		}
+		if msg.From > 0 {
+			//fmt.Printf("Peer message %d -> %d, %d\n", msg.From, msg.To, msg.Index%uint64(s.numPeerConnections))
+			s.stepChannels[msg.From-1][msg.Index%uint64(s.numPeerConnections)] <- msg
+		}
+	}
+
 	//
 	//for {
 	//	if err := client.Read(sizeBuffer); err != nil {
